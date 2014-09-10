@@ -1,9 +1,26 @@
 require "redis/connection/synchrony"
 require "redis"
+require "redis/connection/hiredis"
 require "redis/connection/ruby"
 
 module WebsocketRails
   class Synchronization
+
+    def self.all_users
+      singleton.all_users
+    end
+
+    def self.find_user(connection)
+      singleton.find_user connection
+    end
+
+    def self.register_user(connection)
+      singleton.register_user connection
+    end
+
+    def self.destroy_user(connection)
+      singleton.destroy_user connection
+    end
 
     def self.publish(event)
       singleton.publish event
@@ -17,6 +34,14 @@ module WebsocketRails
       singleton.shutdown!
     end
 
+    def self.redis
+      singleton.redis
+    end
+    
+    def self.ruby_redis
+     singleton.ruby_redis
+    end
+
     def self.singleton
       @singleton ||= new
     end
@@ -24,7 +49,10 @@ module WebsocketRails
     include Logging
 
     def redis
-      @redis ||= Redis.new(WebsocketRails.config.redis_options)
+      @redis ||= begin
+        redis_options = WebsocketRails.config.redis_options
+        EM.reactor_running? ? Redis.new(redis_options) : ruby_redis
+      end
     end
 
     def ruby_redis
@@ -36,9 +64,8 @@ module WebsocketRails
 
     def publish(event)
       Fiber.new do
-        redis_client = EM.reactor_running? ? redis : ruby_redis
         event.server_token = server_token
-        redis_client.publish "websocket_rails.events", event.serialize
+        redis.publish "websocket_rails.events", event.serialize
       end.resume
     end
 
@@ -47,8 +74,9 @@ module WebsocketRails
     end
 
     def synchronize!
+      info "About to try synchronizing!"
       unless @synchronizing
-        @server_token = generate_unique_token
+        @server_token = generate_server_token
         register_server(@server_token)
 
         synchro = Fiber.new do
@@ -75,16 +103,23 @@ module WebsocketRails
 
         @synchronizing = true
 
-        EM.next_tick { synchro.resume }
+        if EM.reactor_running? 
+          debug "Reactor running, defer synchro.resume"
+          EM.defer { synchro.resume }
+        else
+          debug "Reactor not running"
+          synchro.resume
+        end
+        
 
         trap('TERM') do
-          shutdown!
+          Thread.new { shutdown! }
         end
         trap('INT') do
-          shutdown!
+          Thread.new { shutdown! }
         end
         trap('QUIT') do
-          shutdown!
+          Thread.new { shutdown! }
         end
       end
     end
@@ -94,7 +129,7 @@ module WebsocketRails
       when event.is_channel?
         WebsocketRails[event.channel].trigger_event(event)
       when event.is_user?
-        connection = WebsocketRails.users[event.user_id]
+        connection = WebsocketRails.users[event.user_id.to_s]
         return if connection.nil?
         connection.trigger event
       end
@@ -104,7 +139,7 @@ module WebsocketRails
       remove_server(server_token)
     end
 
-    def generate_unique_token
+    def generate_server_token
       begin
         token = SecureRandom.urlsafe_base64
       end while redis.sismember("websocket_rails.active_servers", token)
@@ -120,10 +155,35 @@ module WebsocketRails
     end
 
     def remove_server(token)
+      ruby_redis.srem "websocket_rails.active_servers", token
+      info "Server Removed: #{token}"
+      EM.stop
+    end
+
+    def register_user(connection)
       Fiber.new do
-        redis.srem "websocket_rails.active_servers", token
-        info "Server Removed: #{token}"
-        EM.stop
+        id = connection.user_identifier
+        user = connection.user
+        redis.hset 'websocket_rails.users', id, user.as_json(root: false).to_json
+      end.resume
+    end
+
+    def destroy_user(identifier)
+      Fiber.new do
+        redis.hdel 'websocket_rails.users', identifier
+      end.resume
+    end
+
+    def find_user(identifier)
+      Fiber.new do
+        raw_user = redis.hget('websocket_rails.users', identifier)
+        raw_user ? JSON.parse(raw_user) : nil
+      end.resume
+    end
+
+    def all_users
+      Fiber.new do
+        redis.hgetall('websocket_rails.users')
       end.resume
     end
 

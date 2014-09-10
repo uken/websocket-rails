@@ -7,7 +7,7 @@ module WebsocketRails
     let(:connection) { double('connection') }
 
     before do
-      connection.stub!(:trigger)
+      connection.stub(:trigger)
     end
 
     it "should maintain a pool of subscribed connections" do
@@ -15,6 +15,15 @@ module WebsocketRails
     end
 
     describe "#subscribe" do
+      before do
+        connection.stub(:user).and_return({})
+        WebsocketRails.config.stub(:broadcast_subscriber_events?).and_return(true)
+      end
+      it "should trigger an event when subscriber joins" do
+        subject.should_receive(:trigger).with("subscriber_join", connection.user)
+        subject.subscribe connection
+      end
+
       it "should add the connection to the subscriber pool" do
         subject.subscribe connection
         subject.subscribers.include?(connection).should be_true
@@ -22,6 +31,10 @@ module WebsocketRails
     end
 
     describe "#unsubscribe" do
+      before do
+        connection.stub(:user).and_return({})
+        WebsocketRails.config.stub(:broadcast_subscriber_events?).and_return(true)
+      end
       it "should remove connection from subscriber pool" do
         subject.subscribe connection
         subject.unsubscribe connection
@@ -31,6 +44,12 @@ module WebsocketRails
       it "should do nothing if connection is not subscribed to channel" do
         subject.unsubscribe connection
         subject.subscribers.include?(connection).should be_false
+      end
+
+      it "should trigger an event when subscriber parts" do
+        subject.subscribers << connection
+        subject.should_receive(:trigger).with('subscriber_part', connection.user)
+        subject.unsubscribe connection
       end
     end
 
@@ -43,16 +62,43 @@ module WebsocketRails
           event
         end
         connection.should_receive(:trigger).with(event)
-        subject.subscribe connection
+        subject.subscribers << connection
         subject.trigger 'event', 'data'
       end
     end
 
     describe "#trigger_event" do
-      it "should forward the event to the subscribers" do
-        event = double('event').as_null_object
+      it "should forward the event to subscribers if token matches" do
+        event = Event.new 'awesome_event', {:channel => 'awesome_channel', :token => subject.token}
         subject.should_receive(:send_data).with(event)
         subject.trigger_event event
+      end
+
+      it "should ignore the event if the token is invalid" do
+        event = Event.new 'invalid_event', {:channel => 'awesome_channel', :token => 'invalid_token'}
+        subject.should_not_receive(:send_data).with(event)
+        subject.trigger_event event
+      end
+
+      it "should not propagate if event.propagate is false" do
+        event = Event.new 'awesome_event', {:channel => 'awesome_channel', :token => subject.token, :propagate => false}
+        connection.should_not_receive(:trigger)
+        subject.subscribers << connection
+        subject.trigger_event event
+      end
+    end
+
+    describe "#filter_with" do
+      it "should add the controller to the filtered_channels hash" do
+        filter = double('BaseController')
+        subject.filter_with(filter)
+        subject.filtered_channels[subject.name].should eq(filter)
+      end
+
+      it "should allow setting the catch_all method" do
+        filter = double('BaseController')
+        subject.filter_with(filter, :some_method)
+        subject.filtered_channels[subject.name].should eq([filter, :some_method])
       end
     end
 
@@ -103,6 +149,21 @@ module WebsocketRails
           subject.is_private?.should_not be_true
         end
       end
+
+      describe "#token" do
+        it 'is long enough' do
+          subject.token.length.should > 10
+        end
+
+        it 'remains the same between two call' do
+          subject.token.should == subject.token
+        end
+
+        it 'is the same for two channels with the same name' do
+          subject.token.should == Channel.new(subject.name).token
+        end
+      end
+
     end
   end
 end

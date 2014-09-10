@@ -71,6 +71,11 @@ module WebsocketRails
       case encoded_data
       when String
         event_name, data = JSON.parse encoded_data
+
+        unless event_name.is_a?(String) && data.is_a?(Hash)
+          raise UnknownDataType
+        end
+
         data = data.merge(:connection => connection).with_indifferent_access
         Event.new event_name, data
         # when Array
@@ -93,9 +98,9 @@ module WebsocketRails
     include Logging
     extend StaticEvents
 
-    attr_reader :id, :name, :connection, :namespace, :channel, :user_id
+    attr_reader :id, :name, :connection, :namespace, :channel, :user_id, :token
 
-    attr_accessor :data, :result, :success, :server_token
+    attr_accessor :data, :result, :success, :server_token, :propagate
 
     def initialize(event_name, options={})
       case event_name
@@ -108,14 +113,16 @@ module WebsocketRails
       end
       @id           = options[:id]
       @data         = options[:data].is_a?(Hash) ? options[:data].with_indifferent_access : options[:data]
-      @channel      = options[:channel].to_sym if options[:channel]
+      @channel      = options[:channel].to_sym rescue options[:channel].to_s.to_sym if options[:channel]
+      @token        = options[:token] if options[:token]
       @connection   = options[:connection]
       @server_token = options[:server_token]
       @user_id      = options[:user_id]
+      @propagate    = options[:propagate].nil? ? true : options[:propagate]
       @namespace    = validate_namespace( options[:namespace] || namespace )
     end
 
-    def serialize
+    def as_json
       [
         encoded_name,
         {
@@ -125,9 +132,14 @@ module WebsocketRails
           :data => data,
           :success => success,
           :result => result,
+          :token => token,
           :server_token => server_token
         }
-      ].to_json
+      ]
+    end
+
+    def serialize
+      as_json.to_json
     end
 
     def is_channel?
@@ -144,6 +156,10 @@ module WebsocketRails
 
     def is_internal?
       namespace.include?(:websocket_rails)
+    end
+
+    def should_propagate?
+      @propagate
     end
 
     def trigger

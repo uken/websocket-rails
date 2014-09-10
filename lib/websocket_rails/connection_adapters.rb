@@ -10,7 +10,7 @@ module WebsocketRails
     end
 
     def self.establish_connection(request, dispatcher)
-      adapter = adapters.detect { |a| a.accepts?( request.env ) } || (raise InvalidConnectionError)
+      adapter = adapters.detect { |a| a.accepts?(request.env) } || raise(InvalidConnectionError)
       adapter.new request, dispatcher
     end
 
@@ -28,6 +28,10 @@ module WebsocketRails
 
       attr_reader :dispatcher, :queue, :env, :request, :data_store
 
+      # The ConnectionManager will set the connection ID when the
+      # connection is opened.
+      attr_accessor :id
+
       def initialize(request, dispatcher)
         @env        = request.env.dup
         @request    = request
@@ -39,7 +43,6 @@ module WebsocketRails
         @delegate.instance_variable_set(:@_env, request.env)
         @delegate.instance_variable_set(:@_request, request)
 
-        WebsocketRails.users[user_identifier] = self
         start_ping_timer
       end
 
@@ -55,7 +58,7 @@ module WebsocketRails
       end
 
       def on_close(data=nil)
-        @ping_timer.cancel
+        @ping_timer.try(:cancel)
         dispatch Event.new_on_close( self, data )
         close_connection
       end
@@ -70,28 +73,16 @@ module WebsocketRails
         @queue << event
       end
 
-      attr_accessor :flush_scheduled
-
       def trigger(event)
-        # Uncomment when implementing history queueing with redis
-        #enqueue event
-        #unless flush_scheduled
-        #  EM.next_tick { flush; flush_scheduled = false }
-        #  flush_scheduled = true
-        #end
         send "[#{event.serialize}]"
       end
 
       def flush
-        count = 1
-        message = "["
+        message = []
         @queue.flush do |event|
-          message << event.serialize
-          message << "," unless count == @queue.size
-          count += 1
+          message << event.as_json
         end
-        message << "]"
-        send message
+        send message.to_json
       end
 
       def send_message(event_name, data = {}, options = {})
@@ -110,12 +101,12 @@ module WebsocketRails
         [ -1, {}, [] ]
       end
 
-      def id
-        object_id.to_i
-      end
-
       def controller_delegate
         @delegate
+      end
+
+      def connected?
+        true & @connected
       end
 
       def inspect
@@ -126,31 +117,56 @@ module WebsocketRails
         inspect
       end
 
-      private
+      def user_connection?
+        not user_identifier.nil?
+      end
+
+      def user
+        return unless user_connection?
+        controller_delegate.current_user
+      end
 
       def user_identifier
         @user_identifier ||= begin
           identifier = WebsocketRails.config.user_identifier
 
-          unless @delegate.respond_to?(:current_user) &&
-                 @delegate.current_user &&
-                 @delegate.current_user.respond_to?(identifier)
-            return id
-          end
+          return unless current_user_responds_to?(identifier)
 
           controller_delegate.current_user.send(identifier)
          end
       end
 
+      def ping_interval
+        @ping_interval ||= WebsocketRails.config.default_ping_interval
+      end
+
+      def ping_interval=(interval)
+        @ping_interval = interval.to_i
+        @ping_timer.try(:cancel)
+        start_ping_timer
+      end
+
+      private
+
       def dispatch(event)
         dispatcher.dispatch event
+      end
+
+      def connection_manager
+        dispatcher.connection_manager
       end
 
       def close_connection
         @data_store.destroy!
         @ping_timer.try(:cancel)
         dispatcher.connection_manager.close_connection self
-        WebsocketRails.users.delete(user_identifier)
+      end
+
+      def current_user_responds_to?(identifier)
+        controller_delegate                            &&
+        controller_delegate.respond_to?(:current_user) &&
+        controller_delegate.current_user               &&
+        controller_delegate.current_user.respond_to?(identifier)
       end
 
       attr_accessor :pong
@@ -158,19 +174,22 @@ module WebsocketRails
 
       def start_ping_timer
         @pong = true
-        @ping_timer = EM::PeriodicTimer.new(10) do
-          if pong == true
-            self.pong = false
-            ping = Event.new_on_ping self
-            trigger ping
-          else
-            @ping_timer.cancel
-            on_error
+
+        # Set negative interval to nil to deactivate periodic pings
+        if ping_interval > 0
+          @ping_timer = EM::PeriodicTimer.new(ping_interval) do
+            if pong == true
+              self.pong = false
+              ping = Event.new_on_ping self
+              trigger ping
+            else
+              @ping_timer.cancel
+              on_error
+            end
           end
         end
       end
 
     end
-
   end
 end

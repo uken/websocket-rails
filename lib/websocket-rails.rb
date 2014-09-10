@@ -6,7 +6,6 @@ module WebsocketRails
 
   class << self
     def setup
-      load "#{Rails.root}/config/events.rb" if File.exists?("#{Rails.root}/config/events.rb")
       yield config
     end
 
