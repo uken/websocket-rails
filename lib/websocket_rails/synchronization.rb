@@ -51,7 +51,7 @@ module WebsocketRails
     def redis
       @redis ||= begin
         redis_options = WebsocketRails.config.redis_options
-        EM.reactor_running? ? Redis.new(redis_options) : ruby_redis
+        Redis.new(redis_options)
       end
     end
 
@@ -80,7 +80,7 @@ module WebsocketRails
         register_server(@server_token)
 
         synchro = Fiber.new do
-          fiber_redis = Redis.connect(WebsocketRails.config.redis_options)
+          fiber_redis = Redis.new(WebsocketRails.config.redis_options)
           fiber_redis.subscribe "websocket_rails.events" do |on|
 
             on.message do |_, encoded_event|
@@ -105,7 +105,7 @@ module WebsocketRails
 
         if EM.reactor_running?
           debug "Reactor running, defer synchro.resume"
-          EM.defer { synchro.resume }
+          synchro.resume
         else
           debug "Reactor not running"
           synchro.resume
