@@ -110,14 +110,6 @@ module WebsocketRails
       @redis_options ||= redis_defaults
     end
 
-    def redis_connection=(conn)
-      @redis_connection ||= conn
-    end
-
-    def redis_connection
-      @redis_connection
-    end
-
     def redis_options=(options = {})
       @redis_options = redis_defaults.merge(options)
     end
