@@ -105,7 +105,7 @@ module WebsocketRails
 
         if EM.reactor_running?
           debug "Reactor running, defer synchro.resume"
-          synchro.resume
+          EM.defer { synchro.resume }
         else
           debug "Reactor not running"
           synchro.resume
@@ -125,16 +125,14 @@ module WebsocketRails
     end
 
     def trigger_incoming(event)
-      Fiber.new do
-        case
-        when event.is_channel?
-          WebsocketRails[event.channel].trigger_event(event)
-        when event.is_user?
-          connection = WebsocketRails.users[event.user_id.to_s]
-          return if connection.nil?
-          connection.trigger event
-        end
-      end.resume
+      case
+      when event.is_channel?
+        WebsocketRails[event.channel].trigger_event(event)
+      when event.is_user?
+        connection = WebsocketRails.users[event.user_id.to_s]
+        return if connection.nil?
+        connection.trigger event
+      end
     end
 
     def shutdown!
